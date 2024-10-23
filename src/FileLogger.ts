@@ -27,6 +27,18 @@ export class FileLogger implements Logger {
         this.ensureLogFile();
     }
 
+    async logInfo(message: string): Promise<void> {
+        await this.writeLog('info', message);
+    }
+
+    async logWarning(message: string): Promise<void> {
+      await this.writeLog('warning', message);
+    }
+
+    async logError(message: string): Promise<void> {
+        await this.writeLog('error', message);
+    }
+
     private defaultFormat(level: string, message: string): string {
         const timestamp = new Date().toISOString();
         return `[${timestamp}] ${level.toUpperCase()}: ${message}`;
@@ -44,12 +56,16 @@ export class FileLogger implements Logger {
     }
 
     private async rotateLogFile(): Promise<void> {
-        const { size } = fs.statSync(this.filePath);
-        if (size >= this.maxFileSize) {
-            const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-            const rotatedFilePath = `${this.filePath}.${timestamp}`;
-            fs.renameSync(this.filePath, rotatedFilePath);
-            fs.writeFileSync(this.filePath, '', { encoding: this.encoding });
+        try {
+            const { size } = fs.statSync(this.filePath);
+            if (size >= this.maxFileSize) {
+                const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+                const rotatedFilePath = `${this.filePath}.${timestamp}`;
+                fs.renameSync(this.filePath, rotatedFilePath);
+                fs.writeFileSync(this.filePath, '', { encoding: this.encoding });
+            }
+        } catch (error) {
+            console.error(`Failed to rotate log file: ${this.getErrorMessage(error)}`);
         }
     }
 
@@ -64,22 +80,17 @@ export class FileLogger implements Logger {
             await this.rotateLogFile();
             fs.appendFileSync(this.filePath, formattedMessage, { encoding: this.encoding });
         } catch (error) {
-            if (error instanceof Error)
-                console.error(`Failed to write log: ${error.message}`);
-            else
-                console.error(`Failed to write log: ${String(error)}`);
+            if (error instanceof Error) {
+                console.error(`Failed to write log: ${this.getErrorMessage(error)}`);
+            }     
         }
     }
 
-    async logInfo(message: string): Promise<void> {
-        await this.writeLog('info', message);
-    }
-
-    async logWarning(message: string): Promise<void> {
-      await this.writeLog('warning', message);
-    }
-
-    async logError(message: string): Promise<void> {
-        await this.writeLog('error', message);
+    private getErrorMessage(error: unknown): string {
+        if (error instanceof Error) {
+            return error.message;
+        } else {
+            return String(error);
+        }
     }
 }
