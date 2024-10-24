@@ -5,14 +5,17 @@ import * as path from 'path';
 export interface FileLoggerOptions {
     filePath: string;
     maxFileSize?: number; // bytes
+    maxDirectorySize?: number;
     encoding?: BufferEncoding;
     logLevels?: string[];
     format?: (level: string, message: string) => string;
 }
 
 export class FileLogger implements Logger {
+    private logStream: fs.WriteStream;
     private filePath: string;
     private maxFileSize: number;
+    private maxDirectorySize: number;
     private encoding: BufferEncoding;
     private logLevels: Set<string>;
     private format: (level: string, message: string) => string;
@@ -20,11 +23,18 @@ export class FileLogger implements Logger {
     constructor(options: FileLoggerOptions) {
         this.filePath = options.filePath;
         this.maxFileSize = options.maxFileSize || 10 * 1024 * 1024; // Default 10MB
+        this.maxDirectorySize = options.maxDirectorySize || 100 * 1024 * 1024; // 100MB
         this.encoding = options.encoding || 'utf8';
         this.logLevels = new Set(options.logLevels || ['info', 'warning', 'error']);
         this.format = options.format || this.defaultFormat;
 
         this.ensureLogFile();
+
+        this.logStream = fs.createWriteStream(this.filePath, { flags: 'a', encoding: this.encoding });
+    
+        this.logStream.on('error', (error) => {
+            console.error(`Stream error: ${this.getErrorMessage(error)}`);
+        });
     }
 
     async logInfo(message: string): Promise<void> {
@@ -61,11 +71,74 @@ export class FileLogger implements Logger {
             if (size >= this.maxFileSize) {
                 const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
                 const rotatedFilePath = `${this.filePath}.${timestamp}`;
+                
+                this.logStream.end();
+                
                 fs.renameSync(this.filePath, rotatedFilePath);
-                fs.writeFileSync(this.filePath, '', { encoding: this.encoding });
+                
+                this.logStream = fs.createWriteStream(this.filePath, { flags: 'a', encoding: this.encoding });
+
+                this.logStream.on('error', (error) => {
+                    console.error(`Stream error: ${this.getErrorMessage(error)}`);
+                });
+
+                await this.enforceDirectorySizeLimit();
             }
         } catch (error) {
             console.error(`Failed to rotate log file: ${this.getErrorMessage(error)}`);
+        }
+    }
+
+    private async enforceDirectorySizeLimit(): Promise<void> {
+        try {
+            const dir = path.dirname(this.filePath);
+            const files = fs.readdirSync(dir);
+            let totalSize = 0;
+            const fileInfos: { name: string; size: number; mtime: Date }[] = [];
+
+            // Collect file information
+            for (const file of files) {
+                const filePath = path.join(dir, file);
+
+                // Skip if not a file
+                if (!fs.statSync(filePath).isFile()) {
+                    continue;
+                }
+
+                const stats = fs.statSync(filePath);
+                totalSize += stats.size;
+
+                fileInfos.push({
+                    name: file,
+                    size: stats.size,
+                    mtime: stats.mtime
+                });
+            }
+
+            // Check if total size exceeds maxDirectorySize
+            if (totalSize > this.maxDirectorySize) {
+                // Sort files by modification time (oldest first)
+                fileInfos.sort((a, b) => a.mtime.getTime() - b.mtime.getTime());
+
+                // Delete oldest files until total size is under limit
+                for (const fileInfo of fileInfos) {
+                    const filePath = path.join(dir, fileInfo.name);
+
+                    // Skip the current log file
+                    if (filePath === this.filePath) {
+                        continue;
+                    }
+
+                    fs.unlinkSync(filePath);
+                    totalSize -= fileInfo.size;
+
+                    if (totalSize <= this.maxDirectorySize) {
+                        break;
+                    }
+                }
+            }
+        } catch (error) {
+            console.error(`Failed to enforce directory size limit: ${this.getErrorMessage(error)}`);
         }
     }
 
@@ -78,7 +151,12 @@ export class FileLogger implements Logger {
 
         try {
             await this.rotateLogFile();
-            fs.appendFileSync(this.filePath, formattedMessage, { encoding: this.encoding });
+
+            const canWrite = this.logStream.write(formattedMessage);
+
+            if (!canWrite) {
+                await new Promise((resolve) => this.logStream.once('drain', resolve));
+            }
         } catch (error) {
             if (error instanceof Error) {
                 console.error(`Failed to write log: ${this.getErrorMessage(error)}`);
