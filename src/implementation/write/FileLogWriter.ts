@@ -1,4 +1,25 @@
-import { Logger } from "./Logger";
+import { iLogWriter } from "../../interfaces/iWriter";
+import * as fs from 'fs';
+
+export class FileLogWriter implements iLogWriter {
+    private filePath: string;
+    private stream: fs.WriteStream;
+
+    constructor(filePath: string) {
+        this.filePath = filePath;
+
+        this.stream = fs.createWriteStream(this.filePath, { flags: 'a' });
+        this.stream.on('error', (error) => {
+            console.error(`Error writing to log file: ${error.message}`);
+        });
+    }
+
+    write(message: string): void {
+        this.stream.write(message + '\n');
+    }
+}
+
+import { ILogWriter } from '../../interfaces/iWriter';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -6,16 +27,19 @@ export interface FileLoggerOptions {
     filePath: string;
     maxFileSize?: number; // bytes
     maxDirectorySize?: number;
+    retentionPeriodDays?: number;
     encoding?: BufferEncoding;
     logLevels?: string[];
     format?: (level: string, message: string) => string;
 }
 
-export class FileLogger implements Logger {
+export class FileLogWriter implements ILogWriter {
+    private stream: fs.WriteStream;
     private logStream: fs.WriteStream;
     private filePath: string;
     private maxFileSize: number;
     private maxDirectorySize: number;
+    private retentionPeriodDays: number;
     private encoding: BufferEncoding;
     private logLevels: Set<string>;
     private format: (level: string, message: string) => string;
@@ -24,6 +48,7 @@ export class FileLogger implements Logger {
         this.filePath = options.filePath;
         this.maxFileSize = options.maxFileSize || 10 * 1024 * 1024; // Default 10MB
         this.maxDirectorySize = options.maxDirectorySize || 100 * 1024 * 1024; // 100MB
+        this.retentionPeriodDays = options.retentionPeriodDays || 30;
         this.encoding = options.encoding || 'utf8';
         this.logLevels = new Set(options.logLevels || ['info', 'warning', 'error']);
         this.format = options.format || this.defaultFormat;
@@ -35,18 +60,20 @@ export class FileLogger implements Logger {
         this.logStream.on('error', (error) => {
             console.error(`Stream error: ${this.getErrorMessage(error)}`);
         });
+
+        this.stream = fs.createWriteStream(this.filePath, { flags: 'a' });
     }
 
     async logInfo(message: string): Promise<void> {
-        await this.writeLog('info', message);
+        await this.write('info', message);
     }
 
     async logWarning(message: string): Promise<void> {
-      await this.writeLog('warning', message);
+      await this.write('warning', message);
     }
 
     async logError(message: string): Promise<void> {
-        await this.writeLog('error', message);
+        await this.write('error', message);
     }
 
     private defaultFormat(level: string, message: string): string {
@@ -96,6 +123,9 @@ export class FileLogger implements Logger {
             let totalSize = 0;
             const fileInfos: { name: string; size: number; mtime: Date }[] = [];
 
+            const now = Date.now();
+            const retentionPeriodMs = this.retentionPeriodDays * 24 * 60 * 60 * 1000;
+
             // Collect file information
             for (const file of files) {
                 const filePath = path.join(dir, file);
@@ -108,6 +138,15 @@ export class FileLogger implements Logger {
                 const stats = fs.statSync(filePath);
                 totalSize += stats.size;
 
+                const fileAge = now - stats.mtime.getTime();
+
+                // Delete files older than retention period
+                if (fileAge > retentionPeriodMs && filePath !== this.filePath) {
+                    fs.unlinkSync(filePath);
+                    totalSize -= stats.size;
+                    continue;
+                }
+
                 fileInfos.push({
                     name: file,
                     size: stats.size,
@@ -115,6 +154,7 @@ export class FileLogger implements Logger {
                 });
             }
 
+            // Proceed with size-based deletion if necessary
             // Check if total size exceeds maxDirectorySize
             if (totalSize > this.maxDirectorySize) {
                 // Sort files by modification time (oldest first)
@@ -142,7 +182,7 @@ export class FileLogger implements Logger {
         }
     }
 
-    private async writeLog(level:string, message: string): Promise<void> {
+    private async write(level:string, message: string): Promise<void> {
         if (!this.logLevels.has(level.toLowerCase())) {
             return;
         }
